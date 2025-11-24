@@ -1,4 +1,4 @@
-# ANATOMIE Prompt Generator
+# Anatomie Prompt Generator
 
 A FastAPI service that generates intelligent fashion image prompts for ANATOMIE's luxury performance travel wear brand. The system combines Airtable data with optional LLM-powered structure selection to create production-ready fashion photography descriptions.
 
@@ -6,7 +6,7 @@ A FastAPI service that generates intelligent fashion image prompts for ANATOMIE'
 
 - **Intelligent Prompt Generation**: Selects designers, colors, garments, and prompt structures based on performance metrics
 - **Dual Mode Operation**: Works with or without OpenAI API integration
-- **Airtable Integration**: Fetches real-time data from ANATOMIE's design database
+- **Airtable Integration**: Fetches real-time data from Anatomie's design database
 - **Performance-Optimized**: Evolving structure selection algorithm prioritizes high-performing templates
 - **RESTful API**: Simple HTTP endpoint for easy integration
 
