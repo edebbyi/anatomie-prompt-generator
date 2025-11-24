@@ -1,0 +1,40 @@
+services:
+  - type: web
+    name: anatomie-prompt-generator
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: AIRTABLE_API_KEY
+        sync: false
+      - key: AIRTABLE_BASE_ID
+        sync: false
+      - key: DESIGNERS_TABLE_ID
+        sync: false
+      - key: COLORS_TABLE_ID
+        sync: false
+      - key: GARMENTS_TABLE_ID
+        sync: false
+      - key: PROMPT_STRUCTURES_TABLE_ID
+        sync: false
+      - key: COLORS_ACTIVE_VIEW
+        sync: false
+      - key: GARMENTS_TOPS_VIEW
+        sync: false
+      - key: GARMENTS_DRESSES_VIEW
+        sync: false
+      - key: GARMENTS_OUTERWEAR_VIEW
+        sync: false
+      - key: GARMENTS_PANTS_VIEW
+        sync: false
+      - key: PROMPT_STRUCTURES_ACTIVE_VIEW
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: OPENAI_TEMPERATURE
+        value: "0.4"
+

@@ -1,0 +1,320 @@
+import json
+import random
+import re
+import time
+from typing import Any, Dict, List
+
+from openai import OpenAI
+
+from .config import get_settings
+
+
+SYSTEM_PROMPT = """You are the Evolving Prompt Maker, an internal prompt designer for ANATOMIE, a luxury performance travel wear brand.
+
+CONTEXT:
+You receive data for designers, colors, garments, and prompt structures to generate fashion image prompts.
+
+INPUT DATA STRUCTURE:
+- designers: array of {id, name, style}
+- colors: array of {id, name}
+- garments_by_category: {
+    tops: [{id, name, primary_design_elements[], technical_features[], premium_constructions[]}],
+    others: [same structure for dresses/outerwear/pants]
+  }
+- prompt_structures: array of {
+    id, skeleton (template text),
+    outlier_count, usage_count, avg_rating, z_score, age_weeks,
+    ai_critique, renderer
+  }
+- num_prompts: integer
+- renderer: string (e.g., "Recraft")
+
+YOUR TASK:
+For each of the num_prompts to generate:
+
+1. SELECTION (75% tops / 25% others):
+   - Randomly select 1 designer
+   - Randomly select 1 color
+   - Randomly select 1 garment (75% probability from tops, 25% from others)
+
+2. STRUCTURE SELECTION (Evolving Logic):
+   - Prefer structures with:
+     • Higher outlier_count (proven outlier generators)
+     • Good avg_rating (>3.5)
+     • Reasonable age_weeks (<12 weeks)
+     • Positive z_score (>0)
+   - 10-20% of the time, explore:
+     • Newer structures (age_weeks < 4)
+     • Less-used structures with positive ai_critique
+   - AVOID structures with:
+     • Very low avg_rating (<2.5)
+     • Negative ai_critique mentions ("off-brand", "hallucinatory", "confusing", "generic")
+
+3. PROMPT CONSTRUCTION:
+   - Start with the selected structure's "skeleton" template text
+   - Replace ALL variables using these rules:
+     
+     Variables to replace:
+     ${designer} → selected designer name
+     ${color} → selected color name
+     ${color.toLowerCase()} → selected color name in lowercase
+     ${garmentName} → selected garment name
+     ${pde1} → first primary_design_element or ""
+     ${designElements} → all primary_design_elements joined with ", " or ""
+     ${pcs} → all premium_constructions joined with ", " or ""
+     ${tcs} → all technical_features joined with ", " or ""
+     ${premiumConstruction} → same as ${pcs}
+     ${technicalConstruction} → same as ${tcs}
+     ${premiumConstructions} → first 2 premium_constructions joined with ", " or ""
+     ${technicalConstructions} → first 2 technical_features joined with ", " or ""
+   
+   - CRITICAL BRAND RULES:
+     • If skeleton mentions example brands (Chanel, Dior, etc.), REPLACE with selected designer
+     • If skeleton mentions specific garments (skirt, dress, etc.), REPLACE with actual garment type
+     • NEVER output brands that weren't selected
+     • NEVER output garment types that don't match the selected garment
+   
+   - Append " ---" to the end of the final prompt text
+
+4. OUTPUT FORMAT:
+   Return ONLY valid JSON (no markdown, no code blocks):
+   {
+     "prompts": [
+       {
+         "promptText": "complete prompt with all variables replaced and --- at end",
+         "designerId": "recXXX",
+         "garmentId": "recXXX",
+         "promptStructureId": "recXXX",
+         "renderer": "Recraft"
+       }
+     ]
+   }
+
+QUALITY RULES:
+- Prompts must be vivid, production-ready fashion photography descriptions
+- Ultra-modern travel wear aesthetic (not gym, not formal)
+- Performance fabrics with tailored silhouettes
+- Understated luxury with tonal hardware
+- Visual-only descriptions (no text in images)
+- 3:1 shirt-to-pant ratio maintained across all prompts
+
+OUTPUT VALIDATION:
+- prompts array length MUST equal num_prompts
+- Every prompt MUST have all 5 fields (promptText, designerId, garmentId, promptStructureId, renderer)
+- renderer value MUST match the input renderer exactly
+- All IDs must be valid Airtable record IDs from the input data"""
+
+
+REQUIRED_PROMPT_KEYS = {"promptText", "designerId", "garmentId", "promptStructureId", "renderer"}
+
+
+def _select_garment(garments_by_category: Dict[str, List[Dict[str, Any]]], rng: random.Random) -> Dict[str, Any]:
+    tops = garments_by_category.get("tops") or []
+    others = garments_by_category.get("others") or []
+    if not tops and not others:
+        raise ValueError("No garments available")
+    if tops and (not others or rng.random() < 0.75):
+        return rng.choice(tops)
+    return rng.choice(others if others else tops)
+
+
+def _structure_score(structure: Dict[str, Any]) -> float:
+    score = 0
+    score += float(structure.get("outlier_count") or 0) * 2
+    score += float(structure.get("usage_count") or 0) * 0.1
+    score += float(structure.get("avg_rating") or 0) * 2
+    score += float(structure.get("z_score") or 0) * 3
+    age = float(structure.get("age_weeks") or 0)
+    score -= max(0, age - 4) * 0.2
+    return score
+
+
+def _select_structure(structures: List[Dict[str, Any]], rng: random.Random) -> Dict[str, Any]:
+    if not structures:
+        raise ValueError("No prompt structures available")
+    explore = rng.random() < 0.15
+    if explore:
+        exploratory = [
+            s for s in structures if (s.get("age_weeks") or 0) < 4 or (s.get("usage_count") or 0) < 10
+        ]
+        if exploratory:
+            return rng.choice(exploratory)
+    best_score = None
+    best_struct = None
+    for struct in structures:
+        score = _structure_score(struct)
+        if best_score is None or score > best_score:
+            best_score = score
+            best_struct = struct
+    return best_struct or structures[0]
+
+
+def _build_variable_map(designer: Dict[str, Any], color: Dict[str, Any], garment: Dict[str, Any]) -> Dict[str, str]:
+    design_elements = garment.get("primary_design_elements") or []
+    technical_features = garment.get("technical_features") or []
+    premium_constructions = garment.get("premium_constructions") or []
+
+    return {
+        "designer": designer.get("name", ""),
+        "color": (color.get("name") or ""),
+        "garmentName": garment.get("name", ""),
+        "pde1": design_elements[0] if design_elements else "",
+        "designElements": ", ".join(design_elements) if design_elements else "",
+        "pcs": ", ".join(premium_constructions) if premium_constructions else "",
+        "tcs": ", ".join(technical_features) if technical_features else "",
+        "premiumConstruction": ", ".join(premium_constructions) if premium_constructions else "",
+        "technicalConstruction": ", ".join(technical_features) if technical_features else "",
+        "premiumConstructions": ", ".join(premium_constructions[:2]) if premium_constructions else "",
+        "technicalConstructions": ", ".join(technical_features[:2]) if technical_features else "",
+    }
+
+
+def _fill_skeleton(skeleton: str, variables: Dict[str, str]) -> str:
+    def replacer(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key == "color.toLowerCase()":
+            return variables.get("color", "").lower()
+        return str(variables.get(key, ""))
+
+    return re.sub(r"\$\{([^}]+)\}", replacer, skeleton)
+
+
+def _create_llm_client(api_key: str | None) -> Any:
+    if not api_key:
+        raise ValueError("Missing OPENAI_API_KEY")
+    return OpenAI(api_key=api_key)
+
+
+def _call_llm(client: Any, payload: Dict[str, Any], settings) -> str:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": json.dumps(payload)},
+    ]
+    retries = 2
+    delay = 1
+    for attempt in range(retries):
+        try:
+            if hasattr(client, "chat") and hasattr(client.chat, "completions"):
+                response = client.chat.completions.create(
+                    model=settings.openai_model,
+                    messages=messages,
+                    temperature=settings.openai_temperature,
+                    timeout=30,
+                )
+            elif hasattr(client, "create"):
+                response = client.create(
+                    messages=messages,
+                    model=settings.openai_model,
+                    temperature=settings.openai_temperature,
+                    timeout=30,
+                )
+            else:
+                raise ValueError("Invalid LLM client")
+            return response.choices[0].message.content
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2
+    return ""
+
+
+def _generate_locally(prompt_contexts: List[Dict[str, Any]], renderer: str) -> List[Dict[str, Any]]:
+    prompts: List[Dict[str, Any]] = []
+    for ctx in prompt_contexts:
+        variables = _build_variable_map(ctx["designer"], ctx["color"], ctx["garment"])
+        text = _fill_skeleton(ctx["prompt_structure"]["skeleton"], variables).strip()
+        if not text.endswith("---"):
+            text = f"{text} ---"
+        prompts.append(
+            {
+                "promptText": text,
+                "designerId": ctx["designer"]["id"],
+                "garmentId": ctx["garment"]["id"],
+                "promptStructureId": ctx["prompt_structure"]["id"],
+                "renderer": renderer,
+            }
+        )
+    return prompts
+
+
+def generate_prompts_with_llm(
+    *,
+    num_prompts: int,
+    renderer: str,
+    designers: List[Dict[str, Any]],
+    colors: List[Dict[str, Any]],
+    garments_by_category: Dict[str, List[Dict[str, Any]]],
+    prompt_structures: List[Dict[str, Any]],
+    llm_client: Any | None = None,
+    rng: random.Random | None = None,
+) -> Dict[str, List[Dict[str, Any]]]:
+    rng = rng or random
+    filtered_structures = [s for s in prompt_structures if s.get("renderer") == renderer]
+    if not filtered_structures:
+        raise ValueError(f"No prompt structures found for renderer {renderer}")
+    if not designers or not colors:
+        raise ValueError("Designers and colors are required")
+
+    def build_contexts(count: int) -> List[Dict[str, Any]]:
+        contexts: List[Dict[str, Any]] = []
+        for _ in range(count):
+            designer = rng.choice(designers)
+            color = rng.choice(colors)
+            garment = _select_garment(garments_by_category, rng)
+            structure = _select_structure(filtered_structures, rng)
+            contexts.append(
+                {
+                    "designer": designer,
+                    "color": color,
+                    "garment": garment,
+                    "prompt_structure": structure,
+                }
+            )
+        return contexts
+
+    prompt_contexts = build_contexts(num_prompts)
+
+    if llm_client is None:
+        # No LLM available; return deterministic prompts directly from contexts.
+        return {"prompts": _generate_locally(prompt_contexts, renderer)}
+
+    settings = get_settings()
+    attempts = 2
+    prompts_accum: List[Dict[str, Any]] = []
+    contexts_remaining = prompt_contexts
+    target = num_prompts
+
+    for attempt in range(attempts):
+        try:
+            attempt_payload = {
+                "num_prompts": len(contexts_remaining),
+                "renderer": renderer,
+                "prompt_structures": filtered_structures,
+                "prompt_contexts": contexts_remaining,
+            }
+            raw_content = _call_llm(llm_client, attempt_payload, settings)
+            data = json.loads(raw_content)
+            prompts = data.get("prompts", [])
+            for prompt in prompts:
+                if len(prompts_accum) >= target:
+                    break
+                if REQUIRED_PROMPT_KEYS - prompt.keys():
+                    continue
+                if prompt.get("renderer") != renderer:
+                    continue
+                prompts_accum.append(prompt)
+            if len(prompts_accum) >= target:
+                return {"prompts": prompts_accum[:target]}
+            remaining_needed = target - len(prompts_accum)
+            contexts_remaining = build_contexts(remaining_needed)
+        except json.JSONDecodeError:
+            if attempt == attempts - 1:
+                break
+            continue
+        except Exception:
+            if attempt == attempts - 1:
+                break
+            continue
+
+    raise ValueError("LLM could not return required prompt count")
