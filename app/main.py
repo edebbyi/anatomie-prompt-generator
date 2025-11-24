@@ -6,7 +6,7 @@ from . import airtable_client, llm_agent
 from .config import get_settings
 from .models import GeneratePromptsRequest, GeneratePromptsResponse
 
-app = FastAPI(title="ANATOMIE Prompt Generator")
+app = FastAPI(title="Anatomie Prompt Generator")
 
 
 def _build_llm_client():
@@ -14,6 +14,26 @@ def _build_llm_client():
     if settings.openai_api_key:
         return OpenAI(api_key=settings.openai_api_key)
     return None
+
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "message": "AnatomieE Prompt Generator API",
+        "status": "running",
+        "version": "1.0.0"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint to wake up service from cold start"""
+    return {
+        "status": "healthy",
+        "service": "anatomie-prompt-generator",
+        "message": "Service is running and ready"
+    }
 
 
 @app.post("/generate-prompts", response_model=GeneratePromptsResponse)
