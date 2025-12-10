@@ -1,12 +1,17 @@
 import json
+import logging
 import random
 import re
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
 
 from .config import get_settings
+from .preferences import get_preference_adapter
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You are the Evolving Prompt Maker, an internal prompt designer for ANATOMIE, a luxury performance travel wear brand.
@@ -15,17 +20,17 @@ CONTEXT:
 You receive data for designers, colors, garments, and prompt structures to generate fashion image prompts.
 
 INPUT DATA STRUCTURE:
-- designers: array of {id, name, style}
-- colors: array of {id, name}
-- garments_by_category: {
-    tops: [{id, name, primary_design_elements[], technical_features[], premium_constructions[]}],
+- designers: array of {{id, name, style}}
+- colors: array of {{id, name}}
+- garments_by_category: {{
+    tops: [{{id, name, primary_design_elements[], technical_features[], premium_constructions[]}}],
     others: [same structure for dresses/outerwear/pants]
-  }
-- prompt_structures: array of {
+  }}
+- prompt_structures: array of {{
     id, skeleton (template text),
     outlier_count, usage_count, avg_rating, z_score, age_weeks,
     ai_critique, renderer
-  }
+  }}
 - num_prompts: integer
 - renderer: string (e.g., "Recraft")
 
@@ -55,18 +60,18 @@ For each of the num_prompts to generate:
    - Replace ALL variables using these rules:
      
      Variables to replace:
-     ${designer} → selected designer name
-     ${color} → selected color name
-     ${color.toLowerCase()} → selected color name in lowercase
-     ${garmentName} → selected garment name
-     ${pde1} → first primary_design_element or ""
-     ${designElements} → all primary_design_elements joined with ", " or ""
-     ${pcs} → all premium_constructions joined with ", " or ""
-     ${tcs} → all technical_features joined with ", " or ""
-     ${premiumConstruction} → same as ${pcs}
-     ${technicalConstruction} → same as ${tcs}
-     ${premiumConstructions} → first 2 premium_constructions joined with ", " or ""
-     ${technicalConstructions} → first 2 technical_features joined with ", " or ""
+     ${{{{designer}}}} → selected designer name
+     ${{{{color}}}} → selected color name
+     ${{{{color.toLowerCase()}}}} → selected color name in lowercase
+     ${{{{garmentName}}}} → selected garment name
+     ${{{{pde1}}}} → first primary_design_element or ""
+     ${{{{designElements}}}} → all primary_design_elements joined with ", " or ""
+     ${{{{pcs}}}} → all premium_constructions joined with ", " or ""
+     ${{{{tcs}}}} → all technical_features joined with ", " or ""
+     ${{{{premiumConstruction}}}} → same as ${{{{pcs}}}}
+     ${{{{technicalConstruction}}}} → same as ${{{{tcs}}}}
+     ${{{{premiumConstructions}}}} → first 2 premium_constructions joined with ", " or ""
+     ${{{{technicalConstructions}}}} → first 2 technical_features joined with ", " or ""
    
    - CRITICAL BRAND RULES:
      • If skeleton mentions example brands (Chanel, Dior, etc.), REPLACE with selected designer
@@ -78,17 +83,17 @@ For each of the num_prompts to generate:
 
 4. OUTPUT FORMAT:
    Return ONLY valid JSON (no markdown, no code blocks):
-   {
+   {{{{
      "prompts": [
-       {
+       {{{{
          "promptText": "complete prompt with all variables replaced and --- at end",
          "designerId": "recXXX",
          "garmentId": "recXXX",
          "promptStructureId": "recXXX",
          "renderer": "Recraft"
-       }
+       }}}}
      ]
-   }
+   }}}}
 
 QUALITY RULES:
 - Prompts must be vivid, production-ready fashion photography descriptions
@@ -102,13 +107,59 @@ OUTPUT VALIDATION:
 - prompts array length MUST equal num_prompts
 - Every prompt MUST have all 5 fields (promptText, designerId, garmentId, promptStructureId, renderer)
 - renderer value MUST match the input renderer exactly
-- All IDs must be valid Airtable record IDs from the input data"""
+- All IDs must be valid Airtable record IDs from the input data
+
+{preference_guidance}"""
 
 
 REQUIRED_PROMPT_KEYS = {"promptText", "designerId", "garmentId", "promptStructureId", "renderer"}
 
 
+def _build_system_prompt(structure_id: Optional[str] = None, explore_mode: bool = False) -> str:
+    """
+    Build system prompt with preference guidance or exploration instructions.
+    
+    Args:
+        structure_id: Optional structure ID for structure-specific prompt examples
+        explore_mode: If True, encourage novelty instead of following preferences
+        
+    Returns:
+        Complete system prompt with dynamic guidance inserted
+    """
+    adapter = get_preference_adapter()
+    
+    if explore_mode:
+        preference_section = """
+EXPLORATION MODE:
+For this batch, prioritize CREATIVE VARIETY over consistency with past successes.
+- Try unexpected color combinations
+- Experiment with different compositional approaches
+- Use adjectives and descriptors you haven't used recently
+- Push the boundaries of the brand aesthetic while staying on-brand
+
+This helps discover new directions that might become future favorites.
+"""
+        return SYSTEM_PROMPT.format(preference_guidance=preference_section)
+    
+    guidance = adapter.get_style_guidance(structure_id=structure_id)
+    
+    if guidance:
+        preference_section = f"""
+BRAND PREFERENCE GUIDANCE (learned from successful images):
+{guidance}
+
+When generating prompts, subtly incorporate these preferences into your descriptions.
+This is NOT mandatory for every prompt — use judgment to create variety while trending toward preferred attributes.
+For this structure specifically, draw inspiration from the high-performing prompt examples if provided.
+"""
+    else:
+        preference_section = ""
+    
+    return SYSTEM_PROMPT.format(preference_guidance=preference_section)
+
+
 def _select_garment(garments_by_category: Dict[str, List[Dict[str, Any]]], rng: random.Random) -> Dict[str, Any]:
+    """Select garment with 75% tops / 25% others distribution."""
     tops = garments_by_category.get("tops") or []
     others = garments_by_category.get("others") or []
     if not tops and not others:
@@ -118,7 +169,11 @@ def _select_garment(garments_by_category: Dict[str, List[Dict[str, Any]]], rng: 
     return rng.choice(others if others else tops)
 
 
-def _structure_score(structure: Dict[str, Any]) -> float:
+def _fallback_structure_score(structure: Dict[str, Any]) -> float:
+    """
+    Fallback heuristic score when optimizer scores are not available.
+    Uses Airtable fields directly.
+    """
     score = 0
     score += float(structure.get("outlier_count") or 0) * 2
     score += float(structure.get("usage_count") or 0) * 0.1
@@ -129,27 +184,63 @@ def _structure_score(structure: Dict[str, Any]) -> float:
     return score
 
 
-def _select_structure(structures: List[Dict[str, Any]], rng: random.Random) -> Dict[str, Any]:
+def _select_structure(structures: List[Dict[str, Any]], rng: random.Random, explore_mode: bool = False) -> Dict[str, Any]:
+    """
+    Select a structure based on optimizer scores or exploration logic.
+    
+    Args:
+        structures: List of available structures
+        rng: Random number generator
+        explore_mode: If True, favor newer/less-used structures for novelty
+        
+    Returns:
+        Selected structure dict
+    """
     if not structures:
         raise ValueError("No prompt structures available")
-    explore = rng.random() < 0.15
-    if explore:
+    
+    adapter = get_preference_adapter()
+    
+    # EXPLORATION MODE: Pick from newer or less-used structures
+    if explore_mode:
         exploratory = [
-            s for s in structures if (s.get("age_weeks") or 0) < 4 or (s.get("usage_count") or 0) < 10
+            s for s in structures 
+            if (s.get("age_weeks") or 0) < 4 or (s.get("usage_count") or 0) < 10
         ]
         if exploratory:
             return rng.choice(exploratory)
+        return rng.choice(structures)
+    
+    # EXPLOITATION MODE: Use optimizer scores if available
+    if adapter.has_structure_scores:
+        structure_ids = [s.get("id") for s in structures]
+        ranked = adapter.rank_structures(structure_ids)
+        
+        weights = [max(score, 0.1) for _, score in ranked]  # Floor at 0.1 to avoid zero weights
+        total = sum(weights)
+        if total > 0:
+            normalized_weights = [w / total for w in weights]
+            id_to_struct = {s.get("id"): s for s in structures}
+            ranked_structs = [id_to_struct[sid] for sid, _ in ranked if sid in id_to_struct]
+            
+            if ranked_structs:
+                selected = rng.choices(ranked_structs, weights=normalized_weights[:len(ranked_structs)], k=1)[0]
+                return selected
+    
+    # FALLBACK: Use heuristic scoring if no optimizer scores
     best_score = None
     best_struct = None
     for struct in structures:
-        score = _structure_score(struct)
+        score = _fallback_structure_score(struct)
         if best_score is None or score > best_score:
             best_score = score
             best_struct = struct
+    
     return best_struct or structures[0]
 
 
 def _build_variable_map(designer: Dict[str, Any], color: Dict[str, Any], garment: Dict[str, Any]) -> Dict[str, str]:
+    """Build variable map for skeleton template filling."""
     design_elements = garment.get("primary_design_elements") or []
     technical_features = garment.get("technical_features") or []
     premium_constructions = garment.get("premium_constructions") or []
@@ -170,6 +261,7 @@ def _build_variable_map(designer: Dict[str, Any], color: Dict[str, Any], garment
 
 
 def _fill_skeleton(skeleton: str, variables: Dict[str, str]) -> str:
+    """Fill skeleton template with variables."""
     def replacer(match: re.Match[str]) -> str:
         key = match.group(1)
         if key == "color.toLowerCase()":
@@ -180,14 +272,23 @@ def _fill_skeleton(skeleton: str, variables: Dict[str, str]) -> str:
 
 
 def _create_llm_client(api_key: str | None) -> Any:
+    """Create OpenAI client."""
     if not api_key:
         raise ValueError("Missing OPENAI_API_KEY")
     return OpenAI(api_key=api_key)
 
 
-def _call_llm(client: Any, payload: Dict[str, Any], settings) -> str:
+def _call_llm(
+    client: Any, 
+    payload: Dict[str, Any], 
+    settings,
+    structure_id: Optional[str] = None,
+    explore_mode: bool = False
+) -> str:
+    """Call LLM with dynamic system prompt."""
+    system_prompt = _build_system_prompt(structure_id=structure_id, explore_mode=explore_mode)
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(payload)},
     ]
     retries = 2
@@ -219,13 +320,34 @@ def _call_llm(client: Any, payload: Dict[str, Any], settings) -> str:
     return ""
 
 
-def _generate_locally(prompt_contexts: List[Dict[str, Any]], renderer: str) -> List[Dict[str, Any]]:
+def _generate_locally(
+    prompt_contexts: List[Dict[str, Any]], 
+    renderer: str,
+    explore_mode: bool = False
+) -> List[Dict[str, Any]]:
+    """Generate prompts locally without LLM (fallback mode)."""
+    adapter = get_preference_adapter()
     prompts: List[Dict[str, Any]] = []
+    
     for ctx in prompt_contexts:
         variables = _build_variable_map(ctx["designer"], ctx["color"], ctx["garment"])
+        
+        # Inject preference-based adjective if preferences loaded and NOT in explore mode
+        if adapter.has_preferences and not explore_mode:
+            weighted_adjs = adapter.get_weighted_adjectives()
+            if weighted_adjs:
+                top_adjs = weighted_adjs[:3]
+                weights = [adj[1] for adj in top_adjs]
+                total = sum(weights)
+                if total > 0:
+                    normalized_weights = [w / total for w in weights]
+                    selected = random.choices(top_adjs, weights=normalized_weights, k=1)[0]
+                    variables["preferenceAdjective"] = selected[0]
+        
         text = _fill_skeleton(ctx["prompt_structure"]["skeleton"], variables).strip()
         if not text.endswith("---"):
             text = f"{text} ---"
+        
         prompts.append(
             {
                 "promptText": text,
@@ -249,20 +371,36 @@ def generate_prompts_with_llm(
     llm_client: Any | None = None,
     rng: random.Random | None = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Generate fashion image prompts using LLM or local fallback.
+    
+    Uses optimizer scores and preferences when exploiting,
+    favors novelty when exploring.
+    """
     rng = rng or random
     filtered_structures = [s for s in prompt_structures if s.get("renderer") == renderer]
+    
     if not filtered_structures:
         raise ValueError(f"No prompt structures found for renderer {renderer}")
     if not designers or not colors:
         raise ValueError("Designers and colors are required")
+    
+    # Determine if this batch should be in exploration mode
+    adapter = get_preference_adapter()
+    explore_mode = adapter.should_explore(rng) if adapter.has_preferences else False
+    
+    if explore_mode:
+        logger.info(f"Exploration mode activated for batch of {num_prompts} prompts")
+    else:
+        logger.info(f"Exploitation mode for batch of {num_prompts} prompts")
 
-    def build_contexts(count: int) -> List[Dict[str, Any]]:
+    def build_contexts(count: int, explore: bool = False) -> List[Dict[str, Any]]:
         contexts: List[Dict[str, Any]] = []
         for _ in range(count):
             designer = rng.choice(designers)
             color = rng.choice(colors)
             garment = _select_garment(garments_by_category, rng)
-            structure = _select_structure(filtered_structures, rng)
+            structure = _select_structure(filtered_structures, rng, explore_mode=explore)
             contexts.append(
                 {
                     "designer": designer,
@@ -273,11 +411,10 @@ def generate_prompts_with_llm(
             )
         return contexts
 
-    prompt_contexts = build_contexts(num_prompts)
+    prompt_contexts = build_contexts(num_prompts, explore=explore_mode)
 
     if llm_client is None:
-        # No LLM available; return deterministic prompts directly from contexts.
-        return {"prompts": _generate_locally(prompt_contexts, renderer)}
+        return {"prompts": _generate_locally(prompt_contexts, renderer, explore_mode=explore_mode)}
 
     settings = get_settings()
     attempts = 2
@@ -287,13 +424,24 @@ def generate_prompts_with_llm(
 
     for attempt in range(attempts):
         try:
+            # Get the most common structure ID from contexts for guidance
+            structure_ids = [ctx["prompt_structure"]["id"] for ctx in contexts_remaining]
+            primary_structure_id = max(set(structure_ids), key=structure_ids.count) if structure_ids else None
+            
             attempt_payload = {
                 "num_prompts": len(contexts_remaining),
                 "renderer": renderer,
                 "prompt_structures": filtered_structures,
                 "prompt_contexts": contexts_remaining,
+                "explore_mode": explore_mode,
             }
-            raw_content = _call_llm(llm_client, attempt_payload, settings)
+            raw_content = _call_llm(
+                llm_client, 
+                attempt_payload, 
+                settings, 
+                structure_id=primary_structure_id,
+                explore_mode=explore_mode
+            )
             data = json.loads(raw_content)
             prompts = data.get("prompts", [])
             for prompt in prompts:
@@ -307,7 +455,7 @@ def generate_prompts_with_llm(
             if len(prompts_accum) >= target:
                 return {"prompts": prompts_accum[:target]}
             remaining_needed = target - len(prompts_accum)
-            contexts_remaining = build_contexts(remaining_needed)
+            contexts_remaining = build_contexts(remaining_needed, explore=explore_mode)
         except json.JSONDecodeError:
             if attempt == attempts - 1:
                 break

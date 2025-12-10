@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     service_url: str | None = None
     port: int = 8000
 
+    # Optimizer integration
+    optimizer_service_url: str = "https://optimizer-2ym2.onrender.com"
+    preference_exploration_rate: float = 0.2
+
 
 def get_settings() -> Settings:
     return Settings()  # type: ignore[arg-type]
