@@ -227,16 +227,32 @@ def _select_structure(structures: List[Dict[str, Any]], rng: random.Random, expl
                 selected = rng.choices(ranked_structs, weights=normalized_weights[:len(ranked_structs)], k=1)[0]
                 return selected
     
-    # FALLBACK: Use heuristic scoring if no optimizer scores
-    best_score = None
-    best_struct = None
+    # FALLBACK: Use heuristic scoring with WEIGHTED RANDOM selection
+    # This ensures diversity - higher scoring structures are more likely
+    # to be selected, but lower scoring ones still have a chance
+    scored_structures = []
     for struct in structures:
         score = _fallback_structure_score(struct)
-        if best_score is None or score > best_score:
-            best_score = score
-            best_struct = struct
+        scored_structures.append((struct, score))
     
-    return best_struct or structures[0]
+    # Shift scores to be positive (minimum 0.1) for valid probability weights
+    min_score = min(s for _, s in scored_structures)
+    shift = abs(min_score) + 0.1 if min_score < 0 else 0.1
+    
+    weights = [score + shift for _, score in scored_structures]
+    total = sum(weights)
+    
+    if total > 0:
+        normalized_weights = [w / total for w in weights]
+        selected = rng.choices(
+            [struct for struct, _ in scored_structures], 
+            weights=normalized_weights, 
+            k=1
+        )[0]
+        return selected
+    
+    # Ultimate fallback: random choice
+    return rng.choice(structures)
 
 
 def _build_variable_map(designer: Dict[str, Any], color: Dict[str, Any], garment: Dict[str, Any]) -> Dict[str, str]:
