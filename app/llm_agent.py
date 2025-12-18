@@ -118,10 +118,45 @@ OUTPUT VALIDATION:
 - renderer value MUST match the input renderer exactly
 - All IDs must be valid Airtable record IDs from the input data
 
+STRUCTURE-SPECIFIC WARNINGS:
+If any structure has comments/warnings provided, you MUST address those specific issues.
+These are direct feedback from the designer about problems seen with that structure.
+Treat these warnings as HIGH PRIORITY - they represent real issues that must be fixed.
+Common issues to watch for:
+- Duplicate garments (model wearing multiple of the same item)
+- Off-brand aesthetics
+- Generic or uninspired outputs
+- Incorrect garment types
+
 {preference_guidance}"""
 
 
 REQUIRED_PROMPT_KEYS = {"promptText", "designerId", "garmentId", "promptStructureId", "renderer"}
+
+
+def _build_structure_warnings(prompt_contexts: List[Dict[str, Any]]) -> str:
+    """
+    Build warnings string from structure comments.
+    These are designer critiques about known issues with specific structures.
+    """
+    warnings: List[str] = []
+    seen_structures: set[str] = set()
+
+    for ctx in prompt_contexts:
+        structure = ctx.get("prompt_structure", {})
+        struct_id = structure.get("id") or structure.get("structureId")
+        comments = structure.get("comments", "")
+
+        if comments:
+            comments = str(comments).strip()
+
+        if struct_id and comments and struct_id not in seen_structures:
+            seen_structures.add(struct_id)
+            warnings.append(f"- Structure {struct_id}: {comments}")
+
+    if warnings:
+        return "STRUCTURE-SPECIFIC WARNINGS (HIGH PRIORITY - address these issues):\n" + "\n".join(warnings)
+    return ""
 
 
 def _build_system_prompt(structure_id: Optional[str] = None, explore_mode: bool = False) -> str:
@@ -308,10 +343,13 @@ def _call_llm(
     payload: Dict[str, Any], 
     settings,
     structure_id: Optional[str] = None,
-    explore_mode: bool = False
+    explore_mode: bool = False,
+    structure_warnings: str = "",
 ) -> str:
     """Call LLM with dynamic system prompt."""
     system_prompt = _build_system_prompt(structure_id=structure_id, explore_mode=explore_mode)
+    if structure_warnings:
+        system_prompt = f"{system_prompt}\n\n{structure_warnings}"
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": json.dumps(payload)},
@@ -438,6 +476,14 @@ def generate_prompts_with_llm(
 
     prompt_contexts = build_contexts(num_prompts, explore=explore_mode)
 
+    # Build structure warnings from Airtable comments
+    structure_warnings = _build_structure_warnings(prompt_contexts)
+    if structure_warnings:
+        logger.info(
+            "Including %d structure warnings in LLM context",
+            max(len(structure_warnings.splitlines()) - 1, 0),
+        )
+
     if llm_client is None:
         return {"prompts": _generate_locally(prompt_contexts, renderer, explore_mode=explore_mode)}
 
@@ -465,7 +511,8 @@ def generate_prompts_with_llm(
                 attempt_payload, 
                 settings, 
                 structure_id=primary_structure_id,
-                explore_mode=explore_mode
+                explore_mode=explore_mode,
+                structure_warnings=structure_warnings,
             )
             data = json.loads(raw_content)
             prompts = data.get("prompts", [])

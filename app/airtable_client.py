@@ -112,6 +112,7 @@ def fetch_prompt_structures(renderer: str) -> List[Dict[str, Any]]:
         structures.append(
             {
                 "id": record.get("id", ""),
+                "structureId": fields.get("Structure ID") or "",
                 "renderer": fields.get("Renderer", ""),
                 "skeleton": fields.get("Skeleton", "") or fields.get("skeleton", ""),
                 "outlier_count": fields.get("outlier_count") or 0,
@@ -120,6 +121,7 @@ def fetch_prompt_structures(renderer: str) -> List[Dict[str, Any]]:
                 "z_score": fields.get("z_score") or 0,
                 "age_weeks": fields.get("age_weeks") or 0,
                 "ai_critique": fields.get("AI Critique") or fields.get("ai_critique") or "",
+                "comments": fields.get("Comments") or "",
             }
         )
     return structures
