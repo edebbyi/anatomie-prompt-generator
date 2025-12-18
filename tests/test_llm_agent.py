@@ -125,6 +125,13 @@ def test_generate_prompts_includes_required_fields():
         assert key in prompt
 
 
+def test_system_prompt_includes_garment_uniqueness_rules():
+    prompt = llm_agent._build_system_prompt()
+    assert "GARMENT UNIQUENESS RULES (CRITICAL):" in prompt
+    assert "Each model wears ONE unique garment of each type - NO DUPLICATES" in prompt
+    assert 'Example: "A model in a slate bomber jacket and charcoal trousers" ✓' in prompt
+
+
 def test_only_matching_renderer_structures_sent_to_llm():
     designers, colors, garments, _ = base_data()
     structures = [
@@ -229,4 +236,3 @@ def test_garment_sampling_distribution():
     tops_ids = {g["id"] for g in garments["tops"]}
     tops_count = sum(1 for p in prompts if p["garmentId"] in tops_ids)
     assert 60 <= tops_count <= 90  # reasonable variance around 75%
-

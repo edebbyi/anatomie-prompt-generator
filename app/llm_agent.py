@@ -103,6 +103,15 @@ QUALITY RULES:
 - Visual-only descriptions (no text in images)
 - 3:1 shirt-to-pant ratio maintained across all prompts
 
+GARMENT UNIQUENESS RULES (CRITICAL):
+- Each model wears ONE unique garment of each type - NO DUPLICATES
+- If describing a bomber jacket, the model wears exactly ONE bomber jacket (not two or three)
+- Pants should appear only ONCE per outfit - no duplicate pants
+- Each piece in the outfit must be visually distinct and unique
+- The model should look like they're wearing a curated, singular outfit - not multiples of the same item
+- Example: "A model in a slate bomber jacket and charcoal trousers" ✓
+- NOT: "A model in bomber jackets" or "wearing two pairs of pants" ✗
+
 OUTPUT VALIDATION:
 - prompts array length MUST equal num_prompts
 - Every prompt MUST have all 5 fields (promptText, designerId, garmentId, promptStructureId, renderer)
