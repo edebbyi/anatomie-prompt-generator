@@ -37,4 +37,5 @@ services:
         value: gpt-5.1
       - key: OPENAI_TEMPERATURE
         value: "0.4"
-
+      - key: PYTHON_VERSION
+        value: "3.12.7"
